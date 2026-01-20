@@ -1,6 +1,6 @@
 # DuckDB Zeek Log Query Tool
 
-A high-performance command-line tool for querying Zeek network security log files using DuckDB. This tool automatically discovers schemas across multiple TSV log files and creates a unified view, allowing you to run SQL queries against your Zeek logs efficiently.
+A high-performance command-line tool for querying Zeek network security log files using DuckDB - a "poor man's SIEM" that lets you run SQL queries against your network logs. This tool automatically discovers schemas across multiple TSV log files and creates a unified view, allowing you to efficiently analyze and search through your Zeek logs.
 
 ## Features
 
