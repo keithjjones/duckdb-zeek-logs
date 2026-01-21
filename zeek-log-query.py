@@ -148,7 +148,7 @@ for log_type, schemas in log_collections.items():
             if db_type == 'INET':
                 # Read as VARCHAR since read_csv doesn't support INET, then cast to INET
                 col_defs.append(f"'{f}': 'VARCHAR'")
-                select_cols.append(f"TRY_CAST(CASE WHEN \"{f}\" = '-' OR \"{f}\" IS NULL OR \"{f}\" = '' THEN NULL ELSE \"{f}\" END AS INET) AS \"{f}\"")
+                select_cols.append(f"TRY_CAST(CASE WHEN \"{f}\" = '-' OR \"{f}\" = '(empty)' OR \"{f}\" IS NULL OR \"{f}\" = '' THEN NULL ELSE \"{f}\" END AS INET) AS \"{f}\"")
             elif is_vector or is_set:
                 # Parse container types (vector/set) into DuckDB LIST type
                 # Zeek format: vector[string] -> [value1,value2] or set[addr] -> {value1,value2}
@@ -173,7 +173,7 @@ for log_type, schemas in log_collections.items():
                     # For arrays of IPs: split, then cast each element to INET
                     select_cols.append(f"""
                         CASE 
-                            WHEN "{f}" = '-' OR "{f}" IS NULL OR "{f}" = '' THEN NULL
+                            WHEN "{f}" = '-' OR "{f}" = '(empty)' OR "{f}" IS NULL OR "{f}" = '' THEN NULL
                             WHEN "{f}" = '{bracket_start}{bracket_end}' THEN NULL
                             ELSE list_transform(
                                 string_split(
