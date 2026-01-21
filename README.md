@@ -83,6 +83,17 @@ python3 zeek-log-query.py '.*\.log\.gz$' 'SELECT * FROM conn UNION ALL SELECT * 
 python3 zeek-log-query.py 'conn.*\.gz$' 'SELECT * FROM conn WHERE duration > 10' > results.tsv
 ```
 
+**Query array/vector fields:**
+```bash
+# Find records where a vector field contains a specific value
+# Example: Find connections where app vector contains 'mozilla'
+# Note: This assumes the conn log has an "app" field of type vector[string]
+python3 zeek-log-query.py 'conn.*\.gz$' "SELECT count(*) FROM conn WHERE orig_bytes > 0 AND resp_bytes > 0 AND 'mozilla' = ANY(\"app\")"
+
+# Count elements in a vector/set field
+python3 zeek-log-query.py '*.log.gz$' "SELECT \"id.orig_h\", list_length(\"app\") as app_count FROM conn WHERE list_length(\"app\") > 0"
+```
+
 ## How It Works
 
 1. **File Discovery**: Uses regular expression matching to find all matching log files (searches recursively from current directory)
@@ -133,7 +144,9 @@ The tool automatically maps Zeek types to DuckDB types:
 - `string` → `VARCHAR` (Text data)
 - `pattern` → `VARCHAR` (Regular expression, stored as text)
 - `enum` → `VARCHAR` (Enumeration, stored as text)
-- Container types (`vector`, `set`, `table`, `record`) → `VARCHAR` (Serialized as text in TSV logs)
+- `vector[type]` → `LIST[type]` (Parsed from `[value1,value2]` format into DuckDB LIST)
+- `set[type]` → `LIST[type]` (Parsed from `{value1,value2}` format into DuckDB LIST)
+- `table`, `record` → `VARCHAR` (Complex types serialized as text in TSV logs)
 
 ### Not Applicable to Logs
 - Executable types (`function`, `event`, `hook`) - Not present in log files
@@ -141,7 +154,7 @@ The tool automatically maps Zeek types to DuckDB types:
 - `opaque` - Internal type, not in logs
 - `any` - Generic type, resolves to specific type in logs
 
-Note: Container types like `vector[string]` or `set[addr]` appear as serialized strings in Zeek TSV logs and are stored as `VARCHAR` in DuckDB.
+Note: `vector` and `set` types are automatically parsed from Zeek's serialized format (`[value1,value2]` or `{value1,value2}`) into DuckDB LIST types, allowing you to query array elements using SQL array functions. Complex container types like `table` and `record` remain as `VARCHAR` since they have more complex serialization.
 
 ### IP Address and Network Queries
 

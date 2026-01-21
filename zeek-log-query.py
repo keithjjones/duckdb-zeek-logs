@@ -44,12 +44,38 @@ def get_log_metadata(file_path):
 t0 = time.perf_counter()
 # Find all files matching any of the regex patterns (recursively)
 all_files = set()
-for root, dirs, files in os.walk('.'):
-    for file in files:
-        file_path = os.path.join(root, file)
-        # Check if file matches any of the regex patterns
-        if any(pattern.search(file_path) for pattern in file_regexes):
-            all_files.add(file_path)
+
+# Determine search root: if pattern starts with /, search from root, otherwise from current dir
+search_roots = set()
+for pattern_str in sys.argv[1:-1]:
+    if pattern_str.startswith('/'):
+        # Absolute path pattern - extract the root directory to search from
+        # Find the longest existing directory prefix
+        parts = pattern_str.split('/')
+        for i in range(len(parts), 0, -1):
+            test_path = '/'.join(parts[:i]) if i > 1 else '/'
+            if os.path.isdir(test_path):
+                search_roots.add(test_path)
+                break
+        else:
+            search_roots.add('/')  # Fallback to root
+    else:
+        search_roots.add('.')  # Relative pattern, search from current dir
+
+# If no absolute paths found, default to current directory
+if not search_roots:
+    search_roots.add('.')
+
+# Search from all identified roots
+for search_root in search_roots:
+    for root, dirs, files in os.walk(search_root):
+        for file in files:
+            file_path = os.path.join(root, file)
+            # Normalize path for consistent matching
+            normalized_path = os.path.normpath(file_path)
+            # Check if file matches any of the regex patterns
+            if any(pattern.search(normalized_path) for pattern in file_regexes):
+                all_files.add(normalized_path)
 
 all_files = sorted(all_files)
 # Dict structure: { "conn": { "field_string": { "fields": [], "types": [], "files": [] } } }
@@ -114,10 +140,78 @@ for log_type, schemas in log_collections.items():
         select_cols = []
         for f, t in zip(info['fields'], info['types']):
             db_type = type_map.get(t, 'VARCHAR')
+            
+            # Check if this is a container type (vector or set)
+            is_vector = t.startswith('vector[')
+            is_set = t.startswith('set[')
+            
             if db_type == 'INET':
                 # Read as VARCHAR since read_csv doesn't support INET, then cast to INET
                 col_defs.append(f"'{f}': 'VARCHAR'")
                 select_cols.append(f"TRY_CAST(CASE WHEN \"{f}\" = '-' OR \"{f}\" IS NULL OR \"{f}\" = '' THEN NULL ELSE \"{f}\" END AS INET) AS \"{f}\"")
+            elif is_vector or is_set:
+                # Parse container types (vector/set) into DuckDB LIST type
+                # Zeek format: vector[string] -> [value1,value2] or set[addr] -> {value1,value2}
+                # Extract element type
+                if is_vector:
+                    elem_type = t[7:-1]  # Remove 'vector[' and ']'
+                    bracket_start, bracket_end = '[', ']'
+                else:  # is_set
+                    elem_type = t[4:-1]  # Remove 'set[' and ']'
+                    bracket_start, bracket_end = '{', '}'
+                
+                # Map element type to DuckDB type
+                elem_db_type = type_map.get(elem_type, 'VARCHAR')
+                
+                # Read as VARCHAR, then parse and convert to LIST
+                col_defs.append(f"'{f}': 'VARCHAR'")
+                
+                # Parse the serialized format: remove brackets and split by comma
+                # DuckDB's string_split returns a list, which we can use directly
+                # For INET arrays, we'll need to cast each element separately
+                if elem_db_type == 'INET':
+                    # For arrays of IPs: split, then cast each element to INET
+                    select_cols.append(f"""
+                        CASE 
+                            WHEN "{f}" = '-' OR "{f}" IS NULL OR "{f}" = '' THEN NULL
+                            WHEN "{f}" = '{bracket_start}{bracket_end}' THEN NULL
+                            ELSE list_transform(
+                                string_split(
+                                    REPLACE(REPLACE(TRIM("{f}"), '{bracket_start}', ''), '{bracket_end}', ''),
+                                    ','
+                                ),
+                                x -> TRY_CAST(TRIM(x) AS INET)
+                            )
+                        END AS "{f}"
+                    """)
+                else:
+                    # For other types, split and optionally cast
+                    if elem_db_type != 'VARCHAR':
+                        select_cols.append(f"""
+                            CASE 
+                                WHEN "{f}" = '-' OR "{f}" IS NULL OR "{f}" = '' THEN NULL
+                                WHEN "{f}" = '{bracket_start}{bracket_end}' THEN NULL
+                                ELSE list_transform(
+                                    string_split(
+                                        REPLACE(REPLACE(TRIM("{f}"), '{bracket_start}', ''), '{bracket_end}', ''),
+                                        ','
+                                    ),
+                                    x -> TRY_CAST(TRIM(x) AS {elem_db_type})
+                                )
+                            END AS "{f}"
+                        """)
+                    else:
+                        # For VARCHAR, just split (no casting needed)
+                        select_cols.append(f"""
+                            CASE 
+                                WHEN "{f}" = '-' OR "{f}" IS NULL OR "{f}" = '' THEN NULL
+                                WHEN "{f}" = '{bracket_start}{bracket_end}' THEN NULL
+                                ELSE string_split(
+                                    REPLACE(REPLACE(TRIM("{f}"), '{bracket_start}', ''), '{bracket_end}', ''),
+                                    ','
+                                )
+                            END AS "{f}"
+                        """)
             else:
                 # Use the mapped type directly for other fields
                 col_defs.append(f"'{f}': '{db_type}'")
@@ -174,6 +268,27 @@ try:
                             formatted_row.append(str(val))
                     except:
                         formatted_row.append(str(val))
+                elif isinstance(val, list):
+                    # Convert LIST/ARRAY to Zeek format: [value1,value2,value3]
+                    # Handle lists of INET dictionaries
+                    try:
+                        formatted_items = []
+                        for item in val:
+                            if isinstance(item, dict) and 'address' in item and 'ip_type' in item:
+                                # Convert INET in list
+                                if item['ip_type'] == 1:
+                                    ip = ipaddress.IPv4Address(item['address'])
+                                    formatted_items.append(str(ip))
+                                elif item['ip_type'] == 2:
+                                    ip = ipaddress.IPv6Address(item['address'])
+                                    formatted_items.append(str(ip))
+                                else:
+                                    formatted_items.append(str(item))
+                            else:
+                                formatted_items.append(str(item))
+                        formatted_row.append('[' + ','.join(formatted_items) + ']')
+                    except:
+                        formatted_row.append('[' + ','.join(str(v) for v in val) + ']')
                 else:
                     formatted_row.append(str(val))
             print("\t".join(formatted_row), flush=True)
