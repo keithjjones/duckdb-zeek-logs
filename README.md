@@ -2,6 +2,8 @@
 
 A high-performance command-line tool for querying Zeek network security log files using DuckDB - a "poor man's SIEM" that lets you run SQL queries against your network logs. This tool automatically discovers schemas across multiple TSV log files and creates a unified view, allowing you to efficiently analyze and search through your Zeek logs.
 
+**Note:** For a native DuckDB extension that provides a `read_zeek()` function, see [Yacin's zeek-duckdb extension](https://github.com/ynadji/zeek-duckdb). This script is a Python-based alternative that works with any DuckDB installation without requiring extension compilation.
+
 ## Features
 
 - **Automatic Schema Discovery**: Scans file headers to detect log type (`#path`), field names (`#fields`), and types (`#types`)
