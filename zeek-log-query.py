@@ -14,6 +14,7 @@ if len(sys.argv) < 3:
     print(f"Usage: python3 {script_name} <file_regex> [<file_regex> ...] <sql_query>")
     print(f"Example: python3 {script_name} '.*\\.log\\.gz$' 'SELECT * FROM conn LIMIT 10'")
     print(f"Example: python3 {script_name} 'conn.*\\.gz$' 'http.*\\.gz$' 'SELECT * FROM conn'")
+    print(f"Example (join): python3 {script_name} 'conn.*\\.gz$' 'dns.*\\.gz$' \"SELECT * FROM dns JOIN conn ON dns.uid = conn.uid LIMIT 100\"")
     sys.exit(1)
 
 # Last argument is the SQL query, all others are file regex patterns
@@ -100,6 +101,14 @@ print(f"[*] Analyzed {len(all_files):,} files. Identified {len(log_collections)}
 # 3. Build Views for each Log Type
 t0 = time.perf_counter()
 con = duckdb.connect()
+# Optional: set memory limit so DuckDB spills to disk instead of OOM (e.g. DUCKDB_MEMORY_LIMIT=4GB)
+memory_limit = os.environ.get('DUCKDB_MEMORY_LIMIT')
+if memory_limit:
+    try:
+        con.execute(f"SET memory_limit = '{memory_limit}'")
+        print(f"[*] Memory limit set to {memory_limit} (intermediate results will spill to disk when exceeded)", file=sys.stderr)
+    except Exception as e:
+        print(f"[!] Warning: Could not set memory_limit: {e}", file=sys.stderr)
 # Load INET extension for network queries
 try:
     con.execute("INSTALL inet;")
@@ -239,7 +248,15 @@ row_count = 0
 
 try:
     res = con.execute(user_query)
-    print("\t".join([d[0] for d in res.description]), flush=True)
+    # Make column names unique for JOIN output (duplicate names get _2, _3, ...)
+    col_names = [d[0] for d in res.description]
+    seen = {}
+    unique_names = []
+    for name in col_names:
+        count = seen.get(name, 0) + 1
+        seen[name] = count
+        unique_names.append(f"{name}_{count}" if count > 1 else name)
+    print("\t".join(unique_names), flush=True)
     
     while True:
         chunk = res.fetchmany(1000)

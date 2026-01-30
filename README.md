@@ -75,6 +75,16 @@ python3 zeek-log-query.py '.*\.log\.gz$' 'SELECT * FROM conn WHERE ts > 12345678
 python3 zeek-log-query.py 'conn.*\.gz$' 'http.*\.gz$' 'SELECT * FROM conn'
 ```
 
+**Joining log types:**
+Pass file patterns for each log type you want to join, then use SQL `JOIN` on a common field (e.g. `uid`). The script creates one view per log type; duplicate column names in the output are made unique (e.g. `uid`, `uid_2`).
+```bash
+# Join dns and conn on uid
+python3 zeek-log-query.py 'conn.*\.gz$' 'dns.*\.gz$' "SELECT * FROM dns JOIN conn ON dns.uid = conn.uid LIMIT 100"
+
+# Count joined rows
+python3 zeek-log-query.py 'conn.*\.gz$' 'dns.*\.gz$' "SELECT COUNT(*) FROM dns JOIN conn ON dns.uid = conn.uid"
+```
+
 **Query multiple log types:**
 ```bash
 python3 zeek-log-query.py '.*\.log\.gz$' 'SELECT * FROM conn UNION ALL SELECT * FROM http'
@@ -202,6 +212,24 @@ Example output:
 --- Summary ---
 Total Rows:  1,234,567	Query Time: 2.3456s
 ```
+
+## Memory and large datasets
+
+DuckDB runs **in memory** by default. Data is streamed from the Zeek log files, but query execution (JOINs, GROUP BY, sorts, etc.) uses RAM for intermediate results. Very large log sets or heavy JOINs can cause **out-of-memory (OOM)** errors.
+
+**If you run out of memory:**
+
+1. **Set a memory limit** so DuckDB spills intermediate results to disk instead of using unbounded RAM:
+   ```bash
+   DUCKDB_MEMORY_LIMIT=4GB python3 zeek-log-query.py 'conn.*\.gz$' "SELECT COUNT(*) FROM conn"
+   ```
+   Use a value that fits your machine (e.g. `2GB`, `8GB`). When the limit is reached, DuckDB writes temporary data to disk and continues, which is slower but avoids OOM.
+
+2. **Reduce scope**: Use stricter file regex patterns or date-based directories so fewer files are loaded.
+
+3. **Simplify the query**: Avoid broad JOINs over huge tables; filter first (e.g. `WHERE ts > ...`) or aggregate before joining.
+
+If `DUCKDB_MEMORY_LIMIT` is set, the script prints a message at startup confirming the limit. DuckDB’s default (when not set) is about 75% of system RAM.
 
 ## SQL Query Tips
 
