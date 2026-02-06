@@ -240,9 +240,9 @@ The tool reports timing information for:
 Example output (stderr):
 ```
 [*] Analyzed 150 files. Identified 3 log types in 0.4567s
-[*] View 'conn' created (2 schemas detected)
-[*] View 'http' created (1 schemas detected)
-[*] View 'dns' created (1 schemas detected)
+[*] View 'conn' created (100 files, 2 schemas detected)
+[*] View 'http' created (25 files, 1 schemas detected)
+[*] View 'dns' created (25 files, 1 schemas detected)
 [*] All views initialized in 0.2345s
 
 --- Streaming Results ---

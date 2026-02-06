@@ -324,7 +324,8 @@ for log_type, schemas in log_collections.items():
         # No dotted fields, just alias the raw view
         con.execute(f'CREATE VIEW "{log_type}" AS SELECT * FROM "{raw_view_name}"')
     
-    print(f"[*] View '{log_type}' created ({len(schemas)} schemas detected)", file=sys.stderr)
+    file_count = sum(len(info['files']) for info in schemas.values())
+    print(f"[*] View '{log_type}' created ({file_count:,} files, {len(schemas)} schemas detected)", file=sys.stderr)
 
 t_view = time.perf_counter() - t0
 print(f"[*] All views initialized in {t_view:.4f}s\n", file=sys.stderr)
