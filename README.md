@@ -9,9 +9,15 @@ A high-performance command-line tool for querying Zeek network security log file
 - **Automatic Schema Discovery**: Scans file headers to detect log type (`#path`), field names (`#fields`), and types (`#types`)
 - **Multi-Schema Support**: Handles files with different schemas by creating separate views for each log type
 - **Multiple Log Types**: Automatically creates views for each Zeek log type found (e.g., `conn`, `http`, `dns`)
+- **Struct Fields**: Dotted field names (e.g., `id.orig_h`) are grouped into DuckDB STRUCTs so you can use natural dot notation in SQL without quoting
+- **Native IP/Network Queries**: IP addresses are stored as `INET` type, enabling native CIDR/subnet matching with `<<=` operator
+- **JOIN Support**: Load multiple log types and JOIN them on common fields like `uid`
+- **Container Type Parsing**: `vector[T]` and `set[T]` fields are parsed into DuckDB LIST types with proper element typing
+- **Type Row Output**: Output includes a second header row showing the original Zeek types for each column
 - **Gzip Compression**: Automatically handles gzipped Zeek log files
+- **Absolute Path Support**: Regex patterns can include absolute paths (e.g., `/data/logs/conn.*\.gz$`)
 - **Streaming Results**: Outputs results in real-time as they're processed
-- **Performance Metrics**: Reports timing information for file discovery, schema scanning, and query execution
+- **Memory Management**: Configurable memory limit via `DUCKDB_MEMORY_LIMIT` environment variable; DuckDB spills to disk when exceeded
 - **Tab-Separated Output**: Produces TSV output suitable for piping to other tools
 
 ## Requirements
@@ -35,7 +41,7 @@ python3 zeek-log-query.py <file_regex> [<file_regex> ...] <sql_query>
 
 ### Arguments
 
-- `file_regex`: One or more regular expression patterns matching the Zeek log files to query (searches recursively from current directory)
+- `file_regex`: One or more regular expression patterns matching the Zeek log files to query (searches recursively from current directory, or from the directory prefix if pattern starts with `/`)
 - `sql_query`: A SQL query to execute against the log type views (e.g., query `conn`, `http`, `dns`, etc.) - must be the last argument
 
 ### Examples
@@ -102,27 +108,42 @@ python3 zeek-log-query.py 'conn.*\.gz$' 'SELECT * FROM conn WHERE duration > 10'
 python3 zeek-log-query.py 'conn.*\.gz$' "SELECT count(*) FROM conn WHERE orig_bytes > 0 AND resp_bytes > 0 AND 'mozilla' = ANY(app)"
 
 # Count elements in a vector/set field
-python3 zeek-log-query.py '*.log.gz$' "SELECT id.orig_h, list_length(app) as app_count FROM conn WHERE list_length(app) > 0"
+python3 zeek-log-query.py '.*\.log\.gz$' "SELECT id.orig_h, list_length(app) as app_count FROM conn WHERE list_length(app) > 0"
 ```
 
 ## How It Works
 
-1. **File Discovery**: Uses regular expression matching to find all matching log files (searches recursively from current directory)
-2. **Metadata Extraction**: Reads the first 15 lines of each file to extract `#path`, `#fields`, and `#types` metadata
+1. **File Discovery**: Uses regex matching to find all matching log files. Supports absolute paths (e.g., `/data/logs/conn.*\.gz$`) and relative patterns (searches recursively from current directory)
+2. **Metadata Extraction**: Reads the first 15 lines of each gzipped file to extract `#path`, `#fields`, and `#types` metadata
 3. **Log Type Grouping**: Groups files by Zeek log type (from `#path`) and then by schema (field names and order)
-4. **View Creation**: Creates separate DuckDB views for each log type (e.g., `conn`, `http`, `dns`), with each view unioning files that share the same log type, handling schema differences with `UNION ALL BY NAME`
-5. **Query Execution**: Executes your SQL query and streams results in chunks of 1000 rows
+4. **Type Mapping**: Maps Zeek types to DuckDB types (e.g., `addr` → `INET`, `port` → `BIGINT`, `vector[T]` → `LIST[T]`)
+5. **View Creation**: Creates a raw DuckDB view per log type with `UNION ALL BY NAME`, then wraps it in a struct view that groups dotted field names (e.g., `id.orig_h`) into DuckDB STRUCTs for natural dot-notation access
+6. **Query Execution**: Executes your SQL query and streams results in chunks of 1000 rows, with a type header row showing original Zeek types
 
 ## Output Format
 
-- **Standard Output (stdout)**: Tab-separated query results with headers
+- **Standard Output (stdout)**: Tab-separated query results
 - **Standard Error (stderr)**: Status messages, timing information, and error messages
 
+The output has three sections:
+1. **Row 1**: Column names (duplicate names from JOINs get `_2`, `_3`, etc.)
+2. **Row 2**: Original Zeek type names (e.g., `time`, `addr`, `port`, `count`, `string`)
+3. **Row 3+**: Data rows
+
 The output format matches Zeek log conventions:
-- Null values are displayed as `-`
+- Null values (both `-` and `(empty)` in input) are displayed as `-`
 - Boolean `True` is displayed as `T`
 - Boolean `False` is displayed as `F`
-- IP addresses (INET type) are automatically converted from internal format to readable IP address strings (e.g., `192.168.1.100`)
+- IP addresses (INET type) are automatically converted to readable strings (e.g., `192.168.1.100`)
+- STRUCT fields (e.g., `id`) display as `{orig_h: 192.168.1.100, resp_h: 10.0.0.1, orig_p: 60230, resp_p: 53}`
+- LIST fields display as `[value1,value2,value3]`
+
+Example output:
+```
+ts	uid	id	proto	service
+time	string	record[addr,addr,port,port]	string	string
+1768435188.9	Cx7SWV	{orig_h: 192.168.1.100, resp_h: 10.0.0.1, orig_p: 60230, resp_p: 53}	udp	dns
+```
 
 This design allows you to pipe results to other tools while keeping status information separate:
 
@@ -169,22 +190,22 @@ Note: `vector` and `set` types are automatically parsed from Zeek's serialized f
 
 ### IP Address and Network Queries
 
-IP addresses (Zeek type `addr`) are stored as `INET` type in DuckDB, which enables native network/subnet queries:
+IP addresses (Zeek type `addr`) and subnets (Zeek type `subnet`) are stored as `INET` type in DuckDB, which enables native network/subnet queries:
 
 - **Exact match**: Standard equality works with IP addresses
   ```sql
-  WHERE "id.orig_h" = '192.168.1.1'
+  WHERE id.orig_h = '192.168.1.1'
   ```
 
 - **Network containment**: Use `<<=` operator to check if an IP is contained in a network
   ```sql
-  WHERE "id.orig_h" <<= INET '192.168.1.0/24'
+  WHERE id.orig_h <<= INET '192.168.1.0/24'
   ```
   This checks if the IP address is within the specified CIDR block.
 
 - **Network contains**: Use `>>=` operator to check if a network contains an IP
   ```sql
-  WHERE INET '192.168.1.0/24' >>= "id.resp_h"
+  WHERE INET '192.168.1.0/24' >>= id.resp_h
   ```
 
 The `<<=` operator means "is contained by or equal to" - it returns true if the left-side IP is within the right-side network/subnet.
@@ -198,7 +219,7 @@ The tool reports timing information for:
 - Query execution
 - Total runtime
 
-Example output:
+Example output (stderr):
 ```
 [*] Analyzed 150 files. Identified 3 log types in 0.4567s
 [*] View 'conn' created (2 schemas detected)
@@ -282,14 +303,16 @@ python3 zeek-log-query.py 'dns.*\.gz$' 'SELECT * FROM dns WHERE id.orig_h = '\''
   - Use `.*` instead of `*` for "any characters"
   - Use `\.` instead of `.` to match a literal dot
   - Use `$` to match end of string (e.g., `.*\.gz$` matches files ending in `.gz`)
-  - Regex patterns match against the full file path (relative to current directory)
-- The tool searches recursively from the current directory
+  - Regex patterns match against the full normalized file path
+- **Absolute paths**: If a regex pattern starts with `/`, the tool extracts the longest existing directory prefix from the pattern and searches recursively from there, instead of the current directory
 - The tool skips the first 8 lines of each file (Zeek header lines)
 - Views are named after the Zeek log type from the `#path` metadata (e.g., `conn`, `http`, `dns`)
 - Multiple views are created when your regex patterns match different log types
 - Missing fields in files with different schemas are filled with `NULL` (displayed as `-` in output)
-- The `-` character in input files is treated as a null value (common in Zeek logs)
+- Both `-` (unset) and `(empty)` (empty value) in Zeek input are treated as `NULL` and displayed as `-` in output
 - Boolean values in output are displayed as `T` (True) and `F` (False)
+- Dotted field names (e.g., `id.orig_h`) are grouped into DuckDB STRUCTs, allowing natural dot notation in SQL queries
+- A `schema_source` column is included in each view showing which file a row came from
 - Files that cannot be read are skipped with a warning message
 
 ## License

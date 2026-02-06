@@ -95,6 +95,13 @@ for fname in all_files:
     
     log_collections[l_path][schema_key]['files'].append(fname)
 
+# Build global field_name -> zeek_type mapping (preserves original Zeek types)
+zeek_type_lookup = {}  # "field_name" -> "zeek_type" (e.g., "id.orig_h" -> "addr", "id.orig_p" -> "port")
+for log_type_schemas in log_collections.values():
+    for info in log_type_schemas.values():
+        for f, t in zip(info['fields'], info['types']):
+            zeek_type_lookup[f] = t
+
 t_metadata = time.perf_counter() - t0
 print(f"[*] Analyzed {len(all_files):,} files. Identified {len(log_collections)} log types in {t_metadata:.4f}s", file=sys.stderr)
 
@@ -308,6 +315,29 @@ try:
         seen[name] = count
         unique_names.append(f"{name}_{count}" if count > 1 else name)
     print("\t".join(unique_names), flush=True)
+    
+    # Row 2: Original Zeek type names (looked up from schema metadata)
+    col_types = []
+    for i, name in enumerate(col_names):
+        if name in zeek_type_lookup:
+            # Direct field match (e.g., "ts" -> "time", "uid" -> "string")
+            col_types.append(zeek_type_lookup[name])
+        else:
+            # Check if this is a struct column (e.g., "id" groups "id.orig_h", "id.resp_h", ...)
+            # Build a record type from the sub-fields
+            sub_types = []
+            for field_name, zeek_type in zeek_type_lookup.items():
+                if field_name.startswith(name + '.'):
+                    sub_types.append(zeek_type)
+            if sub_types:
+                col_types.append('record[' + ','.join(sub_types) + ']')
+            else:
+                # SQL expression or alias — use DuckDB type as fallback
+                try:
+                    col_types.append(str(res.description[i][1]).lower())
+                except:
+                    col_types.append('unknown')
+    print("\t".join(col_types), flush=True)
     
     def format_value(val):
         """Recursively format a DuckDB value to match Zeek log conventions."""
