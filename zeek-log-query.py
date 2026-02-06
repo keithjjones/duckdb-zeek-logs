@@ -233,9 +233,60 @@ for log_type, schemas in log_collections.items():
             FROM read_csv({str(info['files'])}, delim='\\t', skip=8, header=false, columns={{{col_def}}}, nullstr='-', ignore_errors=True)
         """)
     
-    # Create a view named after the Zeek #path (e.g., CREATE VIEW conn AS...)
-    view_sql = f"CREATE VIEW \"{log_type}\" AS {' UNION ALL BY NAME '.join(select_statements)}"
+    # Create a raw view with flat dotted column names
+    raw_view_name = f"__{log_type}_raw"
+    view_sql = f"CREATE VIEW \"{raw_view_name}\" AS {' UNION ALL BY NAME '.join(select_statements)}"
     con.execute(view_sql)
+    
+    # Collect all field names (in order) across all schemas for this log type
+    field_order = []
+    seen_fields = set()
+    for info in schemas.values():
+        for f in info['fields']:
+            if f not in seen_fields:
+                seen_fields.add(f)
+                field_order.append(f)
+    
+    # Check if any fields have dots (e.g., id.orig_h)
+    has_dotted = any('.' in f for f in field_order)
+    
+    if has_dotted:
+        # Group dotted fields into STRUCTs so users can write id.orig_h instead of "id.orig_h"
+        from collections import OrderedDict
+        struct_groups = OrderedDict()  # prefix -> [full_field_name, ...]
+        
+        for f in field_order:
+            if '.' in f:
+                prefix = f.split('.', 1)[0]
+                if prefix not in struct_groups:
+                    struct_groups[prefix] = []
+                struct_groups[prefix].append(f)
+        
+        # Build wrapper SELECT: replace dotted fields with STRUCT_PACK
+        wrapper_parts = []
+        seen_prefixes = set()
+        for f in field_order:
+            if '.' in f:
+                prefix = f.split('.', 1)[0]
+                if prefix not in seen_prefixes:
+                    seen_prefixes.add(prefix)
+                    pack_parts = []
+                    for full_name in struct_groups[prefix]:
+                        sub = full_name.split('.', 1)[1]
+                        pack_parts.append(f'"{sub}" := "{full_name}"')
+                    wrapper_parts.append(f'STRUCT_PACK({", ".join(pack_parts)}) AS "{prefix}"')
+            else:
+                wrapper_parts.append(f'"{f}"')
+        
+        # Include schema_source column
+        wrapper_parts.append('"schema_source"')
+        
+        wrapper_sql = f'CREATE VIEW "{log_type}" AS SELECT {", ".join(wrapper_parts)} FROM "{raw_view_name}"'
+        con.execute(wrapper_sql)
+    else:
+        # No dotted fields, just alias the raw view
+        con.execute(f'CREATE VIEW "{log_type}" AS SELECT * FROM "{raw_view_name}"')
+    
     print(f"[*] View '{log_type}' created ({len(schemas)} schemas detected)", file=sys.stderr)
 
 t_view = time.perf_counter() - t0
@@ -258,57 +309,39 @@ try:
         unique_names.append(f"{name}_{count}" if count > 1 else name)
     print("\t".join(unique_names), flush=True)
     
+    def format_value(val):
+        """Recursively format a DuckDB value to match Zeek log conventions."""
+        if val is None:
+            return '-'
+        elif val is False:
+            return 'F'
+        elif val is True:
+            return 'T'
+        elif isinstance(val, dict) and 'address' in val and 'ip_type' in val:
+            # DuckDB INET type -> IP address string
+            try:
+                if val['ip_type'] == 1:  # IPv4
+                    return str(ipaddress.IPv4Address(val['address']))
+                elif val['ip_type'] == 2:  # IPv6
+                    return str(ipaddress.IPv6Address(val['address']))
+            except:
+                pass
+            return str(val)
+        elif isinstance(val, dict):
+            # STRUCT type -> {field1: value1, field2: value2}
+            formatted = ', '.join(f'{k}: {format_value(v)}' for k, v in val.items())
+            return '{' + formatted + '}'
+        elif isinstance(val, list):
+            # LIST type -> [value1,value2,value3]
+            return '[' + ','.join(format_value(item) for item in val) + ']'
+        else:
+            return str(val)
+    
     while True:
         chunk = res.fetchmany(1000)
         if not chunk: break
         for row in chunk:
-            # Convert values to match Zeek log format: None -> '-', False -> 'F', True -> 'T'
-            # Also convert INET types (dictionaries) to IP address strings
-            formatted_row = []
-            for val in row:
-                if val is None:
-                    formatted_row.append('-')
-                elif val is False:
-                    formatted_row.append('F')
-                elif val is True:
-                    formatted_row.append('T')
-                elif isinstance(val, dict) and 'address' in val and 'ip_type' in val:
-                    # Convert DuckDB INET dictionary to IP address string
-                    try:
-                        if val['ip_type'] == 1:  # IPv4
-                            ip = ipaddress.IPv4Address(val['address'])
-                            formatted_row.append(str(ip))
-                        elif val['ip_type'] == 2:  # IPv6
-                            ip = ipaddress.IPv6Address(val['address'])
-                            formatted_row.append(str(ip))
-                        else:
-                            formatted_row.append(str(val))
-                    except:
-                        formatted_row.append(str(val))
-                elif isinstance(val, list):
-                    # Convert LIST/ARRAY to Zeek format: [value1,value2,value3]
-                    # Handle lists of INET dictionaries
-                    try:
-                        formatted_items = []
-                        for item in val:
-                            if isinstance(item, dict) and 'address' in item and 'ip_type' in item:
-                                # Convert INET in list
-                                if item['ip_type'] == 1:
-                                    ip = ipaddress.IPv4Address(item['address'])
-                                    formatted_items.append(str(ip))
-                                elif item['ip_type'] == 2:
-                                    ip = ipaddress.IPv6Address(item['address'])
-                                    formatted_items.append(str(ip))
-                                else:
-                                    formatted_items.append(str(item))
-                            else:
-                                formatted_items.append(str(item))
-                        formatted_row.append('[' + ','.join(formatted_items) + ']')
-                    except:
-                        formatted_row.append('[' + ','.join(str(v) for v in val) + ']')
-                else:
-                    formatted_row.append(str(val))
-            print("\t".join(formatted_row), flush=True)
+            print("\t".join(format_value(val) for val in row), flush=True)
             row_count += 1
             
     print(f"\n--- Summary ---", file=sys.stderr)

@@ -47,22 +47,21 @@ python3 zeek-log-query.py 'conn.*\.log\.gz$' 'SELECT COUNT(*) FROM conn'
 
 **Find top source IPs:**
 ```bash
-python3 zeek-log-query.py 'conn.*\.gz$' 'SELECT "id.orig_h", COUNT(*) as cnt FROM conn GROUP BY "id.orig_h" ORDER BY cnt DESC LIMIT 10'
+python3 zeek-log-query.py 'conn.*\.gz$' "SELECT id.orig_h, COUNT(*) as cnt FROM conn GROUP BY id.orig_h ORDER BY cnt DESC LIMIT 10"
 ```
 
 **Filter by IP address:**
 ```bash
-# Using double quotes for SQL (cleaner escaping)
-python3 zeek-log-query.py 'dns.*\.gz$' "SELECT * FROM dns WHERE \"id.orig_h\" = '192.168.1.100' OR \"id.resp_h\" = '192.168.1.100'"
+python3 zeek-log-query.py 'dns.*\.gz$' "SELECT * FROM dns WHERE id.orig_h = '192.168.1.100' OR id.resp_h = '192.168.1.100'"
 ```
 
 **Filter by network/CIDR:**
 ```bash
 # Find all connections from 192.168.1.0/24 network using native INET matching
-python3 zeek-log-query.py 'dns.*\.gz$' "SELECT * FROM dns WHERE \"id.orig_h\" <<= INET '192.168.1.0/24' OR \"id.resp_h\" <<= INET '192.168.1.0/24'"
+python3 zeek-log-query.py 'dns.*\.gz$' "SELECT * FROM dns WHERE id.orig_h <<= INET '192.168.1.0/24' OR id.resp_h <<= INET '192.168.1.0/24'"
 
 # Find all connections to private networks
-python3 zeek-log-query.py 'conn.*\.gz$' "SELECT * FROM conn WHERE \"id.resp_h\" <<= INET '192.168.0.0/16' OR \"id.resp_h\" <<= INET '10.0.0.0/8'"
+python3 zeek-log-query.py 'conn.*\.gz$' "SELECT * FROM conn WHERE id.resp_h <<= INET '192.168.0.0/16' OR id.resp_h <<= INET '10.0.0.0/8'"
 ```
 
 **Filter by timestamp:**
@@ -100,10 +99,10 @@ python3 zeek-log-query.py 'conn.*\.gz$' 'SELECT * FROM conn WHERE duration > 10'
 # Find records where a vector field contains a specific value
 # Example: Find connections where app vector contains 'mozilla'
 # Note: This assumes the conn log has an "app" field of type vector[string]
-python3 zeek-log-query.py 'conn.*\.gz$' "SELECT count(*) FROM conn WHERE orig_bytes > 0 AND resp_bytes > 0 AND 'mozilla' = ANY(\"app\")"
+python3 zeek-log-query.py 'conn.*\.gz$' "SELECT count(*) FROM conn WHERE orig_bytes > 0 AND resp_bytes > 0 AND 'mozilla' = ANY(app)"
 
 # Count elements in a vector/set field
-python3 zeek-log-query.py '*.log.gz$' "SELECT \"id.orig_h\", list_length(\"app\") as app_count FROM conn WHERE list_length(\"app\") > 0"
+python3 zeek-log-query.py '*.log.gz$' "SELECT id.orig_h, list_length(app) as app_count FROM conn WHERE list_length(app) > 0"
 ```
 
 ## How It Works
@@ -233,16 +232,20 @@ If `DUCKDB_MEMORY_LIMIT` is set, the script prints a message at startup confirmi
 
 ## SQL Query Tips
 
-### Column Names with Dots
+### Column Names with Dots (Struct Fields)
 
-Zeek field names often contain dots (e.g., `id.orig_h`, `id.resp_h`). These must be quoted in SQL queries:
+Zeek field names with dots (e.g., `id.orig_h`, `id.resp_h`) are automatically grouped into DuckDB STRUCTs. This means you can use natural dot notation in SQL without quoting:
 
 ```sql
--- Correct: Use double quotes or backticks
-SELECT "id.orig_h", "id.resp_h" FROM conn
-
--- Incorrect: Will cause "Referenced table 'id' not found" error
+-- Works naturally: id is a STRUCT with fields orig_h, resp_h, orig_p, resp_p
 SELECT id.orig_h, id.resp_h FROM conn
+
+-- SELECT * returns struct columns as a single grouped column
+SELECT * FROM conn
+-- id column shows as: {orig_h: 192.168.1.100, resp_h: 10.0.0.1, orig_p: 60230, resp_p: 53}
+
+-- To get flat output, select individual struct fields
+SELECT ts, uid, id.orig_h, id.resp_h, id.orig_p, id.resp_p, proto FROM conn
 ```
 
 ### String Values
@@ -251,26 +254,26 @@ String values must be quoted with single quotes. IP addresses can be used direct
 
 ```sql
 -- IP address exact match (works with INET type)
-SELECT * FROM dns WHERE "id.orig_h" = '192.168.1.100'
+SELECT * FROM dns WHERE id.orig_h = '192.168.1.100'
 
 -- Network/CIDR queries (requires INET casting and <<= operator)
-SELECT * FROM conn WHERE "id.orig_h" <<= INET '10.0.0.0/8'
+SELECT * FROM conn WHERE id.orig_h <<= INET '10.0.0.0/8'
 
 -- Incorrect: Will cause syntax errors
-SELECT * FROM dns WHERE "id.orig_h" = 192.168.1.100
+SELECT * FROM dns WHERE id.orig_h = 192.168.1.100
 ```
 
 ### Escaping Quotes in Shell
 
-When writing SQL queries from the command line, use double quotes for the SQL string and escape internal double quotes:
+When writing SQL queries from the command line, use double quotes for the SQL string:
 
 ```bash
-# Recommended: Use double quotes for SQL, escape internal double quotes with backslash
-python3 zeek-log-query.py 'dns.*\.gz$' "SELECT * FROM dns WHERE \"id.orig_h\" = '192.168.1.100'"
+# With struct fields, no need to escape column names
+python3 zeek-log-query.py 'dns.*\.gz$' "SELECT * FROM dns WHERE id.orig_h = '192.168.1.100'"
 
-# Alternative: Use single quotes for SQL, but then you need complex escaping for internal quotes
-# This is harder to read: '\'' escapes a single quote within single quotes
-python3 zeek-log-query.py 'dns.*\.gz$' 'SELECT * FROM dns WHERE "id.orig_h" = '\''192.168.1.100'\'''
+# Alternative: Use single quotes for SQL, but you need complex escaping for internal single quotes
+# '\'' escapes a single quote within single quotes
+python3 zeek-log-query.py 'dns.*\.gz$' 'SELECT * FROM dns WHERE id.orig_h = '\''192.168.1.100'\'''
 ```
 
 ## Notes
