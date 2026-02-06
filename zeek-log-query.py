@@ -9,17 +9,47 @@ import ipaddress
 # 1. Start Global Timer
 start_total = time.perf_counter()
 
+script_name = sys.argv[0]
+
+def print_usage():
+    print(f"Usage: python3 {script_name} <file_regex> [<file_regex> ...] <sql_query>", file=sys.stderr)
+    print(f"       python3 {script_name} <file_regex> [<file_regex> ...] -r <sql_file>", file=sys.stderr)
+    print(f"", file=sys.stderr)
+    print(f"Example: python3 {script_name} '.*\\.log\\.gz$' 'SELECT * FROM conn LIMIT 10'", file=sys.stderr)
+    print(f"Example: python3 {script_name} 'conn.*\\.gz$' 'http.*\\.gz$' 'SELECT * FROM conn'", file=sys.stderr)
+    print(f"Example (join): python3 {script_name} 'conn.*\\.gz$' 'dns.*\\.gz$' \"SELECT * FROM dns JOIN conn ON dns.uid = conn.uid LIMIT 100\"", file=sys.stderr)
+    print(f"Example (file): python3 {script_name} 'conn.*\\.gz$' -r query.sql", file=sys.stderr)
+
 if len(sys.argv) < 3:
-    script_name = sys.argv[0]
-    print(f"Usage: python3 {script_name} <file_regex> [<file_regex> ...] <sql_query>")
-    print(f"Example: python3 {script_name} '.*\\.log\\.gz$' 'SELECT * FROM conn LIMIT 10'")
-    print(f"Example: python3 {script_name} 'conn.*\\.gz$' 'http.*\\.gz$' 'SELECT * FROM conn'")
-    print(f"Example (join): python3 {script_name} 'conn.*\\.gz$' 'dns.*\\.gz$' \"SELECT * FROM dns JOIN conn ON dns.uid = conn.uid LIMIT 100\"")
+    print_usage()
     sys.exit(1)
 
-# Last argument is the SQL query, all others are file regex patterns
-file_regexes = [re.compile(arg) for arg in sys.argv[1:-1]]
-user_query = sys.argv[-1]
+# Parse arguments: check for -r <sql_file> flag
+args = sys.argv[1:]
+if '-r' in args:
+    r_idx = args.index('-r')
+    if r_idx + 1 >= len(args):
+        print(f"Error: -r requires a SQL file path argument", file=sys.stderr)
+        print_usage()
+        sys.exit(1)
+    sql_file = args[r_idx + 1]
+    regex_args = args[:r_idx] + args[r_idx + 2:]
+    if not regex_args:
+        print(f"Error: at least one file_regex pattern is required", file=sys.stderr)
+        print_usage()
+        sys.exit(1)
+    try:
+        with open(sql_file, 'r') as f:
+            user_query = f.read().strip()
+    except Exception as e:
+        print(f"Error: Could not read SQL file '{sql_file}': {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[*] Loaded SQL from {sql_file}", file=sys.stderr)
+    file_regexes = [re.compile(arg) for arg in regex_args]
+else:
+    # Last argument is the SQL query, all others are file regex patterns
+    file_regexes = [re.compile(arg) for arg in args[:-1]]
+    user_query = args[-1]
 
 # 2. Schema and Path Discovery
 def get_log_metadata(file_path):
@@ -48,7 +78,7 @@ all_files = set()
 
 # Determine search root: if pattern starts with /, search from root, otherwise from current dir
 search_roots = set()
-for pattern_str in sys.argv[1:-1]:
+for pattern_str in [p.pattern for p in file_regexes]:
     if pattern_str.startswith('/'):
         # Absolute path pattern - extract the root directory to search from
         # Find the longest existing directory prefix

@@ -37,12 +37,14 @@ pip install duckdb
 
 ```bash
 python3 zeek-log-query.py <file_regex> [<file_regex> ...] <sql_query>
+python3 zeek-log-query.py <file_regex> [<file_regex> ...] -r <sql_file>
 ```
 
 ### Arguments
 
 - `file_regex`: One or more regular expression patterns matching the Zeek log files to query (searches recursively from current directory, or from the directory prefix if pattern starts with `/`)
 - `sql_query`: A SQL query to execute against the log type views (e.g., query `conn`, `http`, `dns`, etc.) - must be the last argument
+- `-r <sql_file>`: Read the SQL query from a file instead of the command line. Useful for complex or multi-line queries
 
 ### Examples
 
@@ -93,6 +95,22 @@ python3 zeek-log-query.py 'conn.*\.gz$' 'dns.*\.gz$' "SELECT COUNT(*) FROM dns J
 **Query multiple log types:**
 ```bash
 python3 zeek-log-query.py '.*\.log\.gz$' 'SELECT * FROM conn UNION ALL SELECT * FROM http'
+```
+
+**Read SQL from a file:**
+```bash
+# Write a complex query to a file
+cat > query.sql << 'EOF'
+SELECT id.orig_h, id.resp_h, COUNT(*) as cnt
+FROM conn
+WHERE id.orig_h <<= INET '192.168.1.0/24'
+GROUP BY id.orig_h, id.resp_h
+ORDER BY cnt DESC
+LIMIT 20
+EOF
+
+# Run it with -r
+python3 zeek-log-query.py 'conn.*\.gz$' -r query.sql
 ```
 
 **Save results to a file:**
